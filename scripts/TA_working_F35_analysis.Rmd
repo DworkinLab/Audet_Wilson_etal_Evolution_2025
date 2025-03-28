@@ -1,0 +1,1087 @@
+---
+title: "TA_working_F35_analysis"
+output: html_document
+date: "2023-04-05"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+options(digits = 3)
+```
+
+
+```{r}
+library(effects)
+library(grid)
+library(tidyr)
+library(ggplot2)
+library(ggbeeswarm)
+library(ggridges)
+library(glmmTMB)
+library(emmeans)
+library(effects)
+library(dotwhisker)
+library(car)
+library(olsrr)
+library(boot)
+library(DHARMa)
+library(cowplot)
+library(dplyr)
+library(plyr)
+```
+
+
+Loading in data and doing basic data cleaning
+
+```{r}
+
+rawdat <- read.csv("../data/Audet_2022_terryflies.csv")
+tarsus_dat <- read.csv("../data/tarsus_ConditionData.csv")
+tarsus_dat$Trait <- "tarsus"
+tarsus_dat <- tarsus_dat[,c(3,4,5,6,7,8,9,10,16,17,18,19,10,20)]
+
+headers <- colnames(rawdat)
+colnames(tarsus_dat) <- headers
+
+with(tarsus_dat[tarsus_dat$NewTrait == "tarsus",], 
+     table(interaction(Replicate, Sex, Treatment, drop = T), Cohort))
+
+tarsus_dat <- tarsus_dat[!duplicated(tarsus_dat[,1:8]),]
+
+
+rawdat <- rbind(tarsus_dat,rawdat)
+
+rawdat$length_uM <- rawdat$length_mm*1000
+
+rawdat$log_size <- log2(rawdat$length_uM)
+
+
+
+# check sample sizes
+with(rawdat[rawdat$NewTrait == "tarsus",], 
+     table(interaction(Replicate, Sex, Treatment, drop = T), Cohort))
+# sample sizes are perfect
+
+
+# Make data wide
+rawdat$fly_id <- paste(rawdat$Replicate, 
+                                 rawdat$Cohort0, 
+                                 rawdat$Sex,
+                                 rawdat$Individual,
+                                sep = "_")
+
+
+rawdat_simple <- rawdat[, c(2,3,6,7,13,14,16,17)]
+
+rawdat_simple <- separate(rawdat_simple, 
+                            col = fly_id, 
+                            into = c("Replicate","Cohort","Sex","Individual"), sep = "_")
+
+
+# recheck sample sizes
+with(rawdat_simple[rawdat_simple$NewTrait == "head",], 
+     table(interaction(Replicate, Sex, drop = T), Cohort))
+#
+
+wide_fly <- as.data.frame(pivot_wider(rawdat_simple, 
+                                      names_from = "NewTrait",
+                                      values_from = "log_size"))
+
+colnames(wide_fly) <- tolower(colnames(wide_fly))
+
+wide_fly$cohort <- as.numeric(wide_fly$cohort)
+
+wide_fly$thorax_c <- wide_fly$thorax - mean(wide_fly$thorax)
+
+
+```
+
+Make sure it appears all the data is as expected
+
+```{r}
+
+sum(apply(wide_fly, MARGIN = 1, anyNA))
+
+dim(wide_fly)
+
+```
+
+
+
+``` {r}
+# for a matrix or array, apply can be super useful
+f35_stats <- apply(wide_fly[, 7:11], MARGIN = 2, quantile, na.rm = TRUE)
+# or sapply will do the same since this is a data.frame we are using
+sapply(wide_fly[, 7:11], quantile, na.rm = TRUE)
+
+with(wide_fly, 
+     tapply(head, 
+            INDEX = list(interaction(treatment, replicate, drop = T), cohort, sex), 
+            max, na.rm = TRUE))
+
+with(wide_fly, 
+     tapply(thorax, 
+            INDEX = list(interaction(treatment, replicate, drop = T), cohort, sex), 
+            max, na.rm = TRUE))
+
+with(wide_fly, 
+     tapply(winglength, 
+            INDEX = list(interaction(treatment, replicate, drop = T), cohort, sex), 
+            max, na.rm = TRUE))
+
+with(wide_fly, 
+     tapply(femur, 
+            INDEX = list(interaction(treatment, replicate, drop = T), cohort, sex), 
+            max, na.rm = TRUE))
+
+with(wide_fly, 
+     tapply(tibia, 
+            INDEX = list(interaction(treatment, replicate, drop = T), cohort, sex), 
+            max, na.rm = TRUE))
+
+with(wide_fly, 
+     tapply(tarsus, 
+            INDEX = list(interaction(treatment, replicate, drop = T), cohort, sex), 
+            max, na.rm = TRUE))
+#skim(wide_fly)
+```
+
+Plot raw data sizes for supplement
+
+
+```{r}
+
+narrow_fly <- as.data.frame(pivot_longer(wide_fly, cols = c("femur", "tibia", "winglength", "thorax", "head", "tarsus"), names_to = "trait", values_to = "log_size"))
+
+
+narrow_fly$treatment<-as.factor(narrow_fly$treatment)
+levels(narrow_fly$treatment) <- c("NT", "UCT", "SCT")
+
+ggplot(narrow_fly, aes(x = as.factor(cohort), y = 2^(log_size), colour = treatment, shape = sex)) +
+geom_point(alpha = 0.5, position = position_jitterdodge(
+  jitter.width = 0.2,
+  jitter.height = 0,
+  dodge.width = 0.5)) +
+  theme_bw() +
+  labs(x = "Cohort", y = "Size µm") +
+  scale_x_discrete(drop = FALSE) +
+  facet_grid(trait~., scales="free")
+```
+
+
+The first thing I am going to do is model allometry
+
+```{r}
+
+str(wide_fly)
+
+# Set my factors and relevel data for model interpretation
+
+wide_fly$sex <- as.factor(wide_fly$sex)
+wide_fly$sex <- relevel(wide_fly$sex, "F")
+wide_fly$cohort0 <- as.factor(wide_fly$cohort0)
+wide_fly$cohort_n <- as.numeric(wide_fly$cohort0)
+wide_fly$treatment <- factor(wide_fly$treatment)
+wide_fly$treatment <- factor(wide_fly$treatment, levels = c("NT","UCT","SCT"))
+wide_fly$replicate <- as.factor(wide_fly$replicate)
+
+write.csv(wide_fly, "../data/F35_wideFly.csv", col.names = TRUE, row.names = FALSE)
+
+# Wing length
+
+wing_Allometry <- glmmTMB(winglength ~ (sex + treatment + thorax_c)^3
+                        + diag(1 + sex + thorax_c | treatment:replicate), 
+                              data = wide_fly)
+summary(wing_Allometry)
+
+wing_allo_supp <- plot(pairs(emtrends(wing_Allometry, ~treatment|sex, var = "thorax_c"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Wing") +
+  xlab(NULL) +
+  xlim(c(-0.25,0.25)) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+  
+
+pairs(emtrends(wing_Allometry, ~treatment, var = "thorax_c"))
+
+
+car::Anova(wing_Allometry)
+
+
+# Femur
+
+femur_Allometry <- glmmTMB(femur ~ (sex + treatment + thorax_c)^3
+                        + diag(1 + sex + thorax_c | treatment:replicate), 
+                              data = wide_fly)
+summary(femur_Allometry)
+
+femur_allo_supp <- plot(pairs(emtrends(femur_Allometry, ~treatment|sex, var = "thorax_c"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Femur") +
+  xlab(NULL) +
+  xlim(c(-0.25,0.25)) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+car::Anova(femur_Allometry)
+
+# Tibia
+
+tibia_Allometry <- glmmTMB(tibia ~ (sex + treatment + thorax_c)^3
+                        + diag(1 + sex + thorax_c | treatment:replicate), 
+                              data = wide_fly)
+summary(tibia_Allometry)
+
+tibia_allo_supp <- plot(pairs(emtrends(tibia_Allometry, ~treatment|sex, var = "thorax_c"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Tibia") +
+  xlab(NULL) +
+  xlim(c(-0.25,0.25)) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+car::Anova(tibia_Allometry)
+
+head_Allometry <- glmmTMB(head ~ (sex + treatment + thorax_c)^3
+                        + diag(1 + sex + thorax_c | treatment:replicate), 
+                              data = wide_fly)
+summary(head_Allometry)
+
+
+head_allo_supp <- plot(pairs(emtrends(head_Allometry, ~treatment|sex, var = "thorax_c"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Head") +
+  xlab(NULL) +
+  xlim(c(-0.25,0.25)) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+car::Anova(head_Allometry)
+
+
+tarsus_Allometry <- glmmTMB(tarsus ~ (sex + treatment + thorax_c)^3
+                        + diag(1 + sex + thorax_c | treatment:replicate), 
+                              data = wide_fly)
+summary(tarsus_Allometry)
+
+
+tarsus_allo_supp <- plot(pairs(emtrends(tarsus_Allometry, ~treatment|sex, var = "thorax_c"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Tarsus") +
+  xlab("Estimate contrast") +
+  #xlab(NULL) +
+  xlim(c(-0.25,0.25))
+
+plot_grid(wing_allo_supp,head_allo_supp,femur_allo_supp,tibia_allo_supp,tarsus_allo_supp,ncol = 1, rel_heights = c(1.9,1.9,1.9,1.9,2.4))
+
+
+car::Anova(tarsus_Allometry)
+```
+
+Looking for size trends relative to thorax size for each trait
+
+```{r}
+
+wing_trend <- cbind(as.data.frame(emtrends(wing_Allometry, ~treatment|sex, var = "thorax_c")), trait=c("wing"))
+femur_trend <- cbind(as.data.frame(emtrends(femur_Allometry, ~treatment|sex, var = "thorax_c")), trait=c("femur"))
+tibia_trend <- cbind(as.data.frame(emtrends(tibia_Allometry, ~treatment|sex, var = "thorax_c")), trait=c("tibia"))
+head_trend <- cbind(as.data.frame(emtrends(head_Allometry, ~treatment|sex, var = "thorax_c")), trait=c("head"))
+tarsus_trend <- cbind(as.data.frame(emtrends(tarsus_Allometry, ~treatment|sex, var = "thorax_c")), trait=c("tarsus"))
+
+trends <- as.data.frame(rbind(wing_trend,head_trend,femur_trend,tibia_trend, tarsus_trend))
+
+
+
+trends$trait <- factor(trends$trait, levels = c("wing", "head", "femur", "tibia", "tarsus"))
+trends$treatment <- factor(trends$treatment, levels = c("SCT", "UCT", "NT"))
+
+
+F35_allometry <- ggplot(trends, aes(x=thorax_c.trend, y = treatment, shape = sex, colour = treatment)) +
+  theme_classic() +
+  facet_grid(trait~sex) +
+  geom_linerange(aes(xmin=lower.CL,xmax=upper.CL), position = position_dodge(width = 0.90)) +
+  geom_point(position = position_dodge(width = 0.90)) +
+  xlab("Allometric slope") +
+  ylab("Treatment") +
+  theme(legend.position = "none") +
+  scale_colour_grey(start = 0,end = 0.75,aesthetics = "colour")
+
+```
+
+
+
+Next I want to model changes in condition dependence. First I model it as a factor to find estimated mean sizes for each condition. (This is mostly for plotting cohort sizes)
+
+```{R}
+
+#wing model
+
+wide_fly$cohort_factor <- as.factor(wide_fly$cohort0)
+
+wing_Condition_f <- glmmTMB(winglength ~ (sex + treatment + cohort_factor)^3
+                        + diag(1 + thorax_c + cohort_factor | treatment:replicate), 
+                              data = wide_fly)
+
+
+summary(wing_Condition_f)
+
+
+car::Anova(wing_Condition_f)
+
+wing_means_f <- as.data.frame(emmeans(wing_Condition_f, specs = c("cohort_factor", "treatment", "sex")))
+
+
+wing_condition_supp <- plot(pairs(emmeans(wing_Condition_f, ~treatment|sex, var = "cohort_factor"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Wing") +
+  xlab(NULL) +
+  xlim(c(-0.1,0.1)) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+wing_condition_plot <- ggplot(wing_means_f, aes(x = cohort_factor, y = 2^(emmean), colour = treatment, shape = sex)) +
+  geom_linerange(aes(ymin = 2^(lower.CL), ymax = 2^(upper.CL)), position = position_dodge(width = 0.4), show.legend = FALSE) +
+  ggtitle("Wing") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  xlab("Days Starved") +
+  ylab(NULL) +
+  geom_point(position = position_dodge(width = 0.4),show.legend = FALSE) +
+  scale_colour_grey(start = 0.75,end = 0,aesthetics = "colour")
+
+```
+
+Below is a code chunk with the comparison of SSD between treatments and cohorts
+
+```{r}
+
+# Reaction norm plot
+
+#emmip(wing_Condition_f,   treatment + sex ~ #cohort_factor, CIs = TRUE) + 
+#  ylab("estimated trait value (log2, microM)") +
+#  xlab("cohort")
+
+
+emmeans_for_SSD_contrast_wing <- emmeans(wing_Condition_f, pairwise ~sex | treatment + cohort_factor)
+
+
+SSD_contrasts_wing_SepByCondition <- contrast(emmeans_for_SSD_contrast_wing[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "cohort_factor")
+
+SSD_contrasts_wing <- contrast(emmeans_for_SSD_contrast_wing[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1", cohort_factor = "trt.vs.ctrl1"), 
+                          by = NULL)
+
+plot(SSD_contrasts_wing)
+
+wing_SSD <- as.data.frame(SSD_contrasts_wing)
+
+base_wing <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_wing$contrasts)))
+
+
+#  plotting contrast
+
+wing_contrast_plot <- ggplot(confint(SSD_contrasts_wing), aes(x=estimate, y=treatment_trt.vs.ctrl1, colour=cohort_factor_trt.vs.ctrl1)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.75), size = 0.25) +
+  ylab("Wing") +
+  xlab(NULL) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.075,0.075)) +
+  theme(axis.ticks = element_blank(), axis.text.x = element_blank(), legend.position = "none")
+
+
+
+# Plotting a different way but not for the stats
+wing_SSD_plot <- ggplot(base_wing, aes(x = cohort_factor, y = estimate,colour = treatment, group = treatment)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), show.legend = FALSE, position = position_dodge(width = 0.4), width = .1) +
+  theme(legend.position="none") +
+  ggtitle("Wing") +
+  xlab(NULL) +
+  ylab(NULL) +
+  theme_classic() +
+  geom_line(position = position_dodge(width = 0.4), show.legend = FALSE)
+
+
+```
+
+
+Head response to condition as a factor
+
+```{r}
+# head
+head_Condition_f <- glmmTMB(head ~ (sex + treatment + cohort_factor)^3
+                            + diag(1 + thorax_c + cohort_factor | treatment:replicate),
+                            data = wide_fly)
+
+summary(head_Condition_f)
+car::Anova(head_Condition_f)
+
+head_means_f <- as.data.frame(emmeans(head_Condition_f, specs = c("cohort_factor", "treatment", "sex")))
+
+head_condition_supp <- plot(pairs(emmeans(head_Condition_f, ~treatment|sex, var = "cohort_factor"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Head") +
+  xlab(NULL) +
+  xlim(c(-0.1,0.1)) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+head_condition_plot <- ggplot(head_means_f, aes(x = cohort_factor, y = 2^(emmean), colour = treatment, shape = sex)) +
+  geom_linerange(aes(ymin = 2^(lower.CL), ymax = 2^(upper.CL)), position = position_dodge(width = 0.4), show.legend = FALSE) +
+  ylab("Length (\u00B5m)") +
+  ggtitle("Head") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Days starved") +
+  theme(legend.position="none") +
+  theme_classic() +
+  geom_point(position = position_dodge(width = 0.4), show.legend = FALSE) +
+  scale_colour_grey(start = 0.75,end = 0,aesthetics = "colour")
+
+```
+
+Head SSD comparison
+
+```{r}
+emmeans_for_SSD_contrast_head <- emmeans(head_Condition_f, pairwise ~sex | treatment + cohort_factor)
+
+
+SSD_contrasts_head_byTreat <- contrast(emmeans_for_SSD_contrast_head[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "cohort_factor")
+
+as.data.frame(as.data.frame(SSD_contrasts_head_byTreat))
+
+SSD_contrasts_head <- contrast(emmeans_for_SSD_contrast_head[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1", cohort_factor = "trt.vs.ctrl1"), 
+                          by = NULL)
+
+head_SSD <- as.data.frame(SSD_contrasts_head)
+
+base_head <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_head$contrasts)))
+
+
+
+# Plotting
+head_contrast_plot <- ggplot(confint(SSD_contrasts_head), aes(x=estimate, y=treatment_trt.vs.ctrl1, colour=cohort_factor_trt.vs.ctrl1)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.75), size = 0.25) +
+  ylab("Head") +
+  xlab(NULL) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.075,0.075)) +
+  theme(axis.ticks = element_blank(), axis.text.x = element_blank(), legend.position = "none")
+
+# Plotting a different way but not for the stats
+head_SSD_plot <- ggplot(base_head, aes(x = cohort_factor, y = estimate,colour = treatment, group = treatment)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), show.legend = FALSE, position = position_dodge(width = 0.4), width = .1) +
+  theme(legend.position="none") +
+  ggtitle("Head") +
+  xlab(NULL) +
+  ylab(NULL) +
+  theme_classic() +
+  geom_line(position = position_dodge(width = 0.4), show.legend = FALSE)
+```
+
+Femur response to condition as a factor
+
+```{r}
+# femur
+femur_Condition_f <- glmmTMB(femur ~ (sex + treatment + cohort_factor)^3
+                        + diag(1 + thorax_c + cohort_factor | treatment:replicate), 
+                              data = wide_fly)
+
+summary(femur_Condition_f)
+car::Anova(femur_Condition_f)
+
+femur_means_f <- as.data.frame(emmeans(femur_Condition_f, specs = c("cohort_factor", "treatment", "sex")))
+
+femur_condition_supp <- plot(pairs(emmeans(femur_Condition_f, ~treatment|sex, var = "cohort_factor"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Femur") +
+  xlab(NULL) +
+  xlim(c(-0.1,0.1)) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+femur_condition_plot <- ggplot(femur_means_f, aes(x = cohort_factor, y = 2^(emmean), colour = treatment, shape = sex)) +
+  geom_linerange(aes(ymin = 2^(lower.CL), ymax = 2^(upper.CL)), position = position_dodge(width = 0.4), show.legend = FALSE) +
+  ylab("Length (\u00B5m)") +
+  ggtitle("Femur") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab(NULL) +
+  theme(legend.position="none") +
+  theme_classic() +
+  geom_point(position = position_dodge(width = 0.4), show.legend = FALSE) +
+  scale_colour_grey(start = 0.75,end = 0,aesthetics = "colour")
+
+```
+
+Femur SSD comparison
+```{r}
+emmeans_for_SSD_contrast_femur <- emmeans(femur_Condition_f, pairwise ~sex | treatment + cohort_factor)
+
+
+SSD_contrasts_femur_bytreat <- contrast(emmeans_for_SSD_contrast_femur[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "cohort_factor")
+
+as.data.frame(as.data.frame(SSD_contrasts_femur_bytreat))
+
+SSD_contrasts_femur <- contrast(emmeans_for_SSD_contrast_femur[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1", cohort_factor = "trt.vs.ctrl1"), 
+                          by = NULL)
+
+femur_SSD <- as.data.frame(SSD_contrasts_femur)
+
+base_femur <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_femur$contrasts)))
+
+
+
+# Plotting
+femur_contrast_plot <- ggplot(confint(SSD_contrasts_femur), aes(x=estimate, y=treatment_trt.vs.ctrl1, colour=cohort_factor_trt.vs.ctrl1)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.75), size = 0.25) +
+  ylab("Femur") +
+  xlab(NULL) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.075,0.075)) +
+  theme(axis.ticks = element_blank(), axis.text.x = element_blank(), legend.position = "none")
+
+# Plotting a different way but not for the stats
+femur_SSD_plot <- ggplot(base_femur, aes(x = cohort_factor, y = estimate,colour = treatment, group = treatment)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), show.legend = FALSE, position = position_dodge(width = 0.4), width = .1) +
+  theme(legend.position="none") +
+  ggtitle("Femur") +
+  xlab(NULL) +
+  ylab(NULL) +
+  theme_classic() +
+  geom_line(position = position_dodge(width = 0.4), show.legend = FALSE)
+```
+
+Tibia response to condition as a factor
+```{r}
+#Tibia model
+tibia_Condition_f <- glmmTMB(tibia ~ (sex + treatment + cohort_factor)^3
+                        + diag(1 + thorax_c + cohort_factor | treatment:replicate), 
+                              data = wide_fly)
+
+summary(tibia_Condition_f)
+car::Anova(tibia_Condition_f)
+
+tibia_means_f <- as.data.frame(emmeans(tibia_Condition_f, specs = c("cohort_factor", "treatment", "sex")))
+
+tibia_condition_supp <- plot(pairs(emmeans(tibia_Condition_f, ~treatment|sex, var = "cohort_factor"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Tibia") +
+  xlab(NULL) +
+  xlim(c(-0.1,0.1)) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+tibia_condition_plot <- ggplot(tibia_means_f, aes(x = cohort_factor, y = 2^(emmean), colour = treatment, shape = sex)) +
+  geom_linerange(aes(ymin = 2^(lower.CL), ymax = 2^(upper.CL)), position = position_dodge(width = 0.4), show.legend = FALSE) +
+  ggtitle("Tibia") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab(NULL) +
+  xlab(NULL) +
+  theme(legend.position="none") +
+  theme_classic() +
+  geom_point(position = position_dodge(width = 0.4), show.legend = FALSE) +
+  scale_colour_grey(start = 0.75,end = 0,aesthetics = "colour")
+
+```
+
+Tibia SSD comparison
+```{r}
+emmeans_for_SSD_contrast_tibia <- emmeans(tibia_Condition_f, pairwise ~sex | treatment + cohort_factor)
+
+SSD_contrasts_tibia_bytreat <- contrast(emmeans_for_SSD_contrast_tibia[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "cohort_factor")
+
+as.data.frame(as.data.frame(SSD_contrasts_tibia_bytreat))
+
+SSD_contrasts_tibia <- contrast(emmeans_for_SSD_contrast_tibia[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1", cohort_factor = "trt.vs.ctrl1"), 
+                          by = NULL)
+
+tibia_SSD <- as.data.frame(SSD_contrasts_tibia)
+
+base_tibia <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_tibia$contrasts)))
+
+
+# Plotting
+tibia_contrast_plot <- ggplot(confint(SSD_contrasts_tibia), aes(x=estimate, y=treatment_trt.vs.ctrl1, colour=cohort_factor_trt.vs.ctrl1)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.75), size = 0.25) +
+  ylab("Tibia") +
+  xlab(NULL) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.075,0.075)) +
+  theme(axis.ticks = element_blank(), axis.text.x = element_blank(), legend.position = "none")
+
+# Plotting a different way but not for the stats
+tibia_SSD_plot <- ggplot(base_tibia, aes(x = cohort_factor, y = estimate,colour = treatment, group = treatment)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), show.legend = FALSE, position = position_dodge(width = 0.4), width = .1) +
+  theme(legend.position="none") +
+  ggtitle("Tibia") +
+  xlab(NULL) +
+  ylab(NULL) +
+  theme_classic() +
+  geom_line(position = position_dodge(width = 0.4), show.legend = FALSE)
+```
+
+Tarsus response to condition
+
+```{R}
+
+
+tarsus_Condition_f <- glmmTMB(tarsus ~ (sex + treatment + cohort_factor)^3
+                        + diag(1 + thorax_c + cohort_factor | treatment:replicate), 
+                              data = wide_fly)
+
+
+summary(tarsus_Condition_f)
+
+
+car::Anova(tarsus_Condition_f)
+
+tarsus_means_f <- as.data.frame(emmeans(tarsus_Condition_f, specs = c("cohort_factor", "treatment", "sex")))
+
+tarsus_condition_supp <- plot(pairs(emmeans(tarsus_Condition_f, ~treatment|sex, var = "cohort_factor"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Tarsus") +
+  xlab("Condition response contrast") +
+  xlim(c(-0.1,0.1))
+
+tarsus_condition_plot <- ggplot(tarsus_means_f, aes(x = cohort_factor, y = 2^(emmean), colour = treatment, shape = sex)) +
+  geom_linerange(aes(ymin = 2^(lower.CL), ymax = 2^(upper.CL)), position = position_dodge(width = 0.4), show.legend = FALSE) +
+  ggtitle("Tarsus") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  xlab(NULL) +
+  ylab(NULL) +
+  geom_point(position = position_dodge(width = 0.4),show.legend = FALSE) +
+  scale_colour_grey(start = 0.75,end = 0,aesthetics = "colour")
+
+
+```
+
+Tarsus SSD
+
+```{r}
+emmeans_for_SSD_contrast_tarsus <- emmeans(tarsus_Condition_f, pairwise ~sex | treatment + cohort_factor)
+
+
+SSD_contrasts_tarsus_bytreat <- contrast(emmeans_for_SSD_contrast_tarsus[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "cohort_factor")
+
+as.data.frame(as.data.frame(SSD_contrasts_tarsus_bytreat))
+
+SSD_contrasts_tarsus <- contrast(emmeans_for_SSD_contrast_tarsus[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1", cohort_factor = "trt.vs.ctrl1"), 
+                          by = NULL)
+
+tarsus_SSD <- as.data.frame(SSD_contrasts_tarsus)
+
+base_tarsus <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_tarsus$contrasts)))
+
+
+tarsus_contrast_plot <- ggplot(confint(SSD_contrasts_tarsus), aes(x=estimate, y=treatment_trt.vs.ctrl1, colour=cohort_factor_trt.vs.ctrl1)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.85), size = 0.25) +
+  ylab("Tarsus") +
+  xlab("F-M contrast between treatment") +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.075,0.075)) +
+  theme(axis.ticks = element_blank(),legend.position = "none")
+
+
+
+# Plotting a different way but not for the stats
+tarsus_SSD_plot <- ggplot(base_tarsus, aes(x = cohort_factor, y = estimate,colour = treatment, group = treatment)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), show.legend = FALSE, position = position_dodge(width = 0.4), width = .1) +
+  theme(legend.position="none") +
+  ggtitle("Tarsus") +
+  xlab(NULL) +
+  ylab(NULL) +
+  theme_classic() +
+  geom_line(position = position_dodge(width = 0.4), show.legend = FALSE)
+```
+
+SSD contrast plot
+```{r}
+
+plot1 <- plot_grid(wing_contrast_plot,head_contrast_plot,femur_contrast_plot,tibia_contrast_plot,tarsus_contrast_plot,ncol = 1,rel_heights = c(0.65,0.65,0.65,0.65,1))
+
+
+dummy_plot <- ggplot(confint(SSD_contrasts_tarsus), aes(x=estimate, y=treatment_trt.vs.ctrl1, colour=cohort_factor_trt.vs.ctrl1)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.85), size = 0.25) +
+  ylab("Tarsus") +
+  xlab("F-M contrast between treatment") +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.title = "Days starved contrast") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.075,0.075)) +
+  theme(axis.ticks = element_blank()) +
+  guides(colour=guide_legend("Days\nstarved\ncontrast"))
+    
+
+legend <- get_legend(dummy_plot)
+
+plot_grid(plot1,legend,rel_widths = c(1,0.2))
+
+```
+
+
+Below I plot all estimated trait means and response to condition together with cowplot including a legend made from extracting them from two dummy plots
+```{r}
+dummy_plot <- ggplot(tibia_means_f, aes(x = cohort_factor, y = 2^(emmean), colour = treatment, shape = sex)) +
+geom_linerange(aes(ymin = 2^(lower.CL), ymax = 2^(upper.CL)), position = position_dodge(width = 0.4), show.legend = FALSE) +
+  ggtitle("Tarsus") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab(NULL) +
+  xlab(NULL) +
+  theme_classic() +
+  guides(fill="none",shape="none") +
+  guides(color = guide_legend(override.aes = list(size = 0.75))) +
+  theme(legend.title = element_text(size = 5), 
+               legend.text = element_text(size = 5)) +
+  geom_point(position = position_dodge(width = 0.4)) +
+  scale_colour_grey(start = 0.75,end = 0,aesthetics = "colour")
+
+
+dummy_plot_2 <- ggplot(tibia_means_f, aes(x = cohort_factor, y = 2^(emmean), colour = treatment, shape = sex)) +
+geom_linerange(aes(ymin = 2^(lower.CL), ymax = 2^(upper.CL)), position = position_dodge(width = 0.4), show.legend = FALSE) +
+  ggtitle("Tarsus") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab(NULL) +
+  xlab(NULL) +
+  theme_classic() +
+  guides(fill="none",colour="none") +
+  #guides(color = guide_legend(override.aes = list(size = 0.75))) +
+  theme(legend.title = element_text(size = 5), 
+               legend.text = element_text(size = 5)) +
+  geom_point(position = position_dodge(width = 0.4)) +
+  scale_colour_grey(start = 0.75,end = 0,aesthetics = "colour")
+
+
+treatment_legend <- get_legend(dummy_plot)
+shape_legend <- get_legend(dummy_plot_2)
+
+legend <- plot_grid(treatment_legend,shape_legend,ncol = 2, align = 'hv', axis = 'b', rel_widths = c(1, 1.5))
+
+response_condition <- plot_grid(femur_condition_plot,tibia_condition_plot,tarsus_condition_plot,head_condition_plot,wing_condition_plot,axis = "t")
+
+
+## plotting supplemental contrast
+
+plot_grid(wing_condition_supp,head_condition_supp,femur_condition_supp,tibia_condition_supp,tarsus_condition_supp,ncol = 1)
+
+
+
+```
+
+
+Below I plot SSD without the condition contrast
+```{r}
+SSD_wing <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_wing$contrasts)))
+SSD_head <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_head$contrasts)))
+SSD_femur <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_femur$contrasts)))
+SSD_tibia <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_tibia$contrasts)))
+SSD_tarsus <- as.data.frame(as.data.frame(confint(emmeans_for_SSD_contrast_tarsus$contrasts)))
+
+wing_SSD_plot <- ggplot(SSD_wing[SSD_wing$cohort_factor == 0,], aes(x=estimate, y=treatment, colour=cohort_factor)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.85), size = 0.25) +
+  ylab("Wing") +
+  xlab(NULL) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.15,0.15)) +
+  theme(axis.ticks = element_blank(),legend.position = "none")
+
+head_SSD_plot <- ggplot(SSD_head[SSD_head$cohort_factor == 0,], aes(x=estimate, y=treatment, colour=cohort_factor)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.85), size = 0.25) +
+  ylab("Head") +
+  xlab(NULL) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.15,0.15)) +
+  theme(axis.ticks = element_blank(),legend.position = "none")
+
+femur_SSD_plot <- ggplot(SSD_femur[SSD_femur$cohort_factor == 0,], aes(x=estimate, y=treatment, colour=cohort_factor)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.85), size = 0.25) +
+  ylab("Femur") +
+  xlab(NULL) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.15,0.15)) +
+  theme(axis.ticks = element_blank(),legend.position = "none")
+
+tibia_SSD_plot <- ggplot(SSD_tibia[SSD_tibia$cohort_factor == 0,], aes(x=estimate, y=treatment, colour=cohort_factor)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.85), size = 0.25) +
+  ylab("Tibia") +
+  xlab(NULL) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.15,0.15)) +
+  theme(axis.ticks = element_blank(),legend.position = "none")
+
+tarsus_SSD_plot <- ggplot(SSD_tarsus[SSD_tarsus$cohort_factor == 0,], aes(x=estimate, y=treatment, colour=cohort_factor)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.85), size = 0.25) +
+  ylab("Tarsus") +
+  xlab(NULL) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  scale_colour_grey(start = 0.5, end = 0) +
+  xlim(c(-0.15,0.15)) +
+  theme(axis.ticks = element_blank(),legend.position = "none")
+
+F35_SSD <- plot_grid(femur_SSD_plot,tibia_SSD_plot,tarsus_SSD_plot,wing_SSD_plot,head_SSD_plot,ncol = 1)
+
+```
+
+
+
+
+
+Below I look at response to condition as a trend in each trait (numeric condition)
+
+```{r}
+
+#wing model
+
+# Making cohort numeric so that I can model trends of condition
+wide_fly$cohort_numeric <- as.numeric(wide_fly$cohort)
+
+wing_Condition_mod1 <- glmmTMB(winglength ~ (sex + treatment + cohort_numeric)^3
+                        + diag(1 + thorax_c + cohort_numeric | treatment:replicate), 
+                              data = wide_fly)
+
+
+summary(wing_Condition_mod1)
+
+# getting estimated means for cohort - this is returning contrasts for some reason
+
+wing_slopes_mod1 <- emtrends(wing_Condition_mod1, ~ treatment|sex, var = "cohort_numeric")
+
+pairs(wing_slopes_mod1)
+
+car::Anova(wing_Condition_mod1)
+
+
+plot(wing_slopes_mod1)
+# Female wings becoming less condition dependent in treatments
+# Males not responding
+
+
+wing_slope <- cbind(as.data.frame(wing_slopes_mod1), trait=c("wing"))
+
+
+# head
+head_Condition_n <- glmmTMB(head ~ (sex + treatment + cohort_numeric)^3 
+                            + diag(1 + thorax_c + cohort_numeric | treatment:replicate), 
+                              data = wide_fly)
+
+summary(head_Condition_n)
+# Minor interaction between condition sex and SCT
+car::Anova(head_Condition_n)
+
+head_slopes_mod1 <- emtrends(head_Condition_n, ~ treatment|sex, var = "cohort_numeric")
+
+plot(head_slopes_mod1)
+pairs(head_slopes_mod1)
+# Female heads becoming less condition dependent in UCT
+# Males unchanged, moving in direction of becoming less condition dependent
+
+head_slope <- cbind(as.data.frame(head_slopes_mod1), trait=c("head"))
+
+
+# femur
+femur_Condition_n <- glmmTMB(femur ~ (sex + treatment + cohort_numeric)^3
+                        + diag(1 + thorax_c + cohort_numeric | treatment:replicate), 
+                              data = wide_fly)
+
+summary(femur_Condition_n)
+# No interaction sex:cohort:treatment
+car::Anova(femur_Condition_n)
+# no interaction sex:cohort:treatment
+
+femur_slopes_mod1 <- emtrends(femur_Condition_n, ~ treatment|sex, var = "cohort_numeric")
+
+plot(femur_slopes_mod1)
+pairs(femur_slopes_mod1)
+# Female femur unchanged, moving in different dorection in the two treatments
+# Males unchanged
+
+femur_slope <- cbind(as.data.frame(femur_slopes_mod1), trait=c("femur"))
+
+
+
+#Tibia model
+tibia_Condition_n <- glmmTMB(tibia ~ (sex + treatment + cohort_numeric)^3
+                        + diag(1 + thorax_c + cohort_numeric | treatment:replicate), 
+                              data = wide_fly)
+
+summary(tibia_Condition_n)
+car::Anova(tibia_Condition_n)
+# No sex:treatment:condition interaction
+
+tibia_slopes_mod1 <- emtrends(tibia_Condition_n, ~ treatment|sex, var = "cohort_numeric")
+
+plot(tibia_slopes_mod1)
+pairs(tibia_slopes_mod1)
+# Females in SCT are more condition dependent for tibia
+# Males unchanged
+
+tibia_slope <- cbind(as.data.frame(tibia_slopes_mod1), trait=c("tibia"))
+
+#Tarsus model
+tarsus_Condition_n <- glmmTMB(tarsus ~ (sex + treatment + cohort_numeric)^3
+                        + diag(1 + thorax_c + cohort_numeric | treatment:replicate), 
+                              data = wide_fly)
+
+summary(tarsus_Condition_n)
+car::Anova(tarsus_Condition_n)
+# No sex:treatment:condition interaction
+
+tarsus_slopes_mod1 <- emtrends(tarsus_Condition_n, ~ treatment|sex, var = "cohort_numeric")
+
+plot(tarsus_slopes_mod1)
+pairs(tarsus_slopes_mod1)
+# Females in SCT are more condition dependent for tibia
+# Males unchanged
+
+tibia_slope <- cbind(as.data.frame(tibia_slopes_mod1), trait=c("tibia"))
+tarsus_slope <- cbind(as.data.frame(tarsus_slopes_mod1), trait=c("tarsus"))
+
+
+
+con_trends <- as.data.frame(rbind(wing_slope,head_slope,femur_slope,tibia_slope,tarsus_slope))
+
+con_trends$trait <- as.factor(con_trends$trait)
+
+con_trends$trait <- factor(con_trends$trait, levels = c("wing", "head", "femur", "tibia", "tarsus"))
+con_trends$treatment <- factor(con_trends$treatment, levels = c("SCT", "UCT", "NT"))
+con_trends$cohort <- factor(con_trends$cohort, levels = c("2", "1", "0"))
+
+
+
+
+
+# figure
+trend_condition <- ggplot(con_trends, aes(x=cohort_numeric.trend, y = treatment, shape = sex, colour = treatment)) +
+  geom_linerange(aes(xmin=lower.CL,xmax=upper.CL),position=position_dodge2(width = 0.9), show.legend = FALSE) +
+  theme(strip.text.x = element_blank()) +
+  theme_classic() +
+  facet_wrap(~trait, ncol = 1, strip.position = "right") +
+  ylab(NULL) +
+  xlab("Slope of condition") +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(), axis.line.y = element_blank(), legend.position = "none") +
+  geom_point(position = position_dodge2(width = 0.90), show.legend = FALSE) +
+  scale_colour_grey(start = 0,end = 0.75,aesthetics = "colour")
+
+
+first_plot <- plot_grid(response_condition,trend_condition,rel_widths = c(1,0.5))
+
+F35_condition <- plot_grid(first_plot,rel_widths = c(1,0.1))
+
+```
+
+
+Below I plot the F35 SSD
+
+```{r}
+
+part_1 <- plot_grid(femur_SSD_plot,tibia_SSD_plot,tarsus_SSD_plot,wing_SSD_plot,head_SSD_plot,legend)
+
+plot_grid(part_1,legend,rel_widths = c(1,0.1))
+
+
+
+```
+
+
+Just as a supplemental figure, I want to model thorax size between treatment groups.
+
+
+```{R}
+
+
+thorax_Condition_f <- glmmTMB(thorax_c ~ (sex + treatment + cohort_factor)^3
+                        + diag(1 + cohort_factor | treatment:replicate), 
+                              data = wide_fly)
+
+
+summary(thorax_Condition_f)
+
+
+car::Anova(tarsus_Condition_f)
+
+thorax_means_f <- as.data.frame(emmeans(thorax_Condition_f, specs = c("cohort_factor", "treatment", "sex")))
+
+thorax_condition_supp <- plot(pairs(emmeans(thorax_Condition_f, ~treatment|sex, var = "cohort_factor"))) +
+  geom_vline(xintercept = 0, alpha = 0.5, linetype=2) +
+  ylab("Thorax") +
+  xlab("Condition response contrast") +
+  xlim(c(-0.1,0.1))
+
+thorax_condition_plot <- ggplot(thorax_means_f, aes(x = cohort_factor, y = 2^(emmean), colour = treatment, shape = sex)) +
+  geom_linerange(aes(ymin = 2^(lower.CL), ymax = 2^(upper.CL)), position = position_dodge(width = 0.4), show.legend = FALSE) +
+  ggtitle("Thorax F35") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  ylab("Thorax size (mm)") +
+  geom_point(position = position_dodge(width = 0.4)) +
+  scale_colour_grey(start = 0.75,end = 0,aesthetics = "colour")
+
+
+```

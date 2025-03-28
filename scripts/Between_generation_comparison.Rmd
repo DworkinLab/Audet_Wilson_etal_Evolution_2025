@@ -1,0 +1,152 @@
+---
+title: "between_generations"
+author: "Tyler Audet"
+date: "2025-03-02"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library(data.table)
+library(glmmTMB)
+library(emmeans)
+library(ggplot2)
+
+```
+
+
+
+```{r}
+
+F35 <- read.csv("../data/F35_wideFly.csv")
+F75 <- read.csv("../data/gen75_wideFly.csv")
+
+F35$generation <- "35"
+F75$generation <- "75"
+
+F35 <- F35[c("treatment","replicate","cohort","sex","individual","tarsus","femur","tibia","winglength","thorax","head","generation")]
+F75 <- F75[c("treatment","replicate","cohort","sex","individual","tarsus","femur","tibia","wing","thorax","head","generation")]
+
+colnames(F35) <- colnames(F75)
+
+F35 <- as.data.table(F35)
+F75 <- as.data.table(F75)
+
+wide_fly <- rbind(F35,F75)
+
+wide_fly$thorax_c <- wide_fly$thorax - mean(wide_fly$thorax, na.rm = T)
+
+```
+
+```{r}
+wing_Allometry <- glmmTMB(wing ~ (sex + treatment + thorax_c + generation)^4
+                        + diag(1 + thorax_c + sex | treatment:replicate), 
+                              data = wide_fly)
+
+summary(wing_Allometry)
+
+tarsus_Allometry <- glmmTMB(tarsus ~ (sex + treatment + thorax_c + generation)^4
+                        + diag(1 + thorax_c + sex | treatment:replicate), 
+                              data = wide_fly)
+
+summary(tarsus_Allometry)
+
+tibia_Allometry <- glmmTMB(tibia ~ (sex + treatment + thorax_c + generation)^4
+                        + diag(1 + thorax_c + sex | treatment:replicate), 
+                              data = wide_fly)
+
+summary(tibia_Allometry)
+
+femur_Allometry <- glmmTMB(femur ~ (sex + treatment + thorax_c + generation)^4
+                        + diag(1 + thorax_c + sex | treatment:replicate), 
+                              data = wide_fly)
+
+summary(femur_Allometry)
+
+head_Allometry <- glmmTMB(head ~ (sex + treatment + thorax_c + generation)^4
+                        + diag(1 + thorax_c + sex | treatment:replicate), 
+                              data = wide_fly)
+
+summary(head_Allometry)
+```
+
+
+```{r}
+
+wing_emm <- emmeans(wing_Allometry, pairwise ~sex | treatment + generation)
+
+
+wing_contrast <- as.data.table(confint(contrast(wing_emm[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "generation")))
+
+#
+
+tarsus_emm <- emmeans(tarsus_Allometry, pairwise ~sex | treatment + generation)
+
+
+tarsus_contrast <- as.data.table(confint(contrast(tarsus_emm[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "generation")))
+
+#
+
+tibia_emm <- emmeans(tibia_Allometry, pairwise ~sex | treatment + generation)
+
+
+tibia_contrast <- as.data.table(confint(contrast(tibia_emm[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "generation")))
+
+#
+
+femur_emm <- emmeans(femur_Allometry, pairwise ~sex | treatment + generation)
+
+
+femur_contrast <- as.data.table(confint(contrast(femur_emm[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "generation")))
+
+#
+
+head_emm <- emmeans(head_Allometry, pairwise ~sex | treatment + generation)
+
+
+head_contrast <- as.data.table(confint(contrast(head_emm[[1]], 
+                          interaction = c(treatment = "trt.vs.ctrl1"), 
+                          by = "generation")))
+
+wing_contrast <- cbind(wing_contrast, "wing")
+tarsus_contrast <- cbind(tarsus_contrast, "tarsus")
+tibia_contrast <- cbind(tibia_contrast, "tibia")
+femur_contrast <- cbind(femur_contrast, "femur")
+head_contrast <- cbind(head_contrast, "head")
+
+contrast_dt <- rbind(wing_contrast,tarsus_contrast,tibia_contrast,femur_contrast,head_contrast)
+
+```
+
+```{r}
+
+ggplot(contrast_dt, aes(x = estimate, y=treatment_trt.vs.ctrl1)) +
+  geom_pointrange(aes(xmin = upper.CL, xmax = lower.CL), position = position_dodge(width=0.75), size = 0.25) +
+  facet_grid(cols = vars(generation), rows = vars(V2), space = "free_x") +
+  xlim(c(-0.047,0.047)) +
+  scale_x_continuous(limits=c(-0.06,0.06)) +
+  geom_vline(xintercept = 0, lty = 2 , alpha = 0.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none") +
+  theme_classic() +
+  ylab("SSD (F-M) treatment contrast") +
+  xlab("estimate") +
+  scale_colour_grey(start = 0.5, end = 0)
+
+```
+
+

@@ -1,0 +1,181 @@
+---
+title: "Fertilization success experiment "
+author: "Audrey Wilson and Ian Dworkin"
+date: "`r format(Sys.time(),'%d %b %Y')`"
+output: 
+  pdf_document: 
+    toc: true
+    number_sections: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(digits = 3)
+```
+
+## Background to the experiment and the analysis.
+
+Background, this script contains the analysis of the data generated from an experiment performed by Audrey Wilson August - November 2020. The purpose of the experiment was to determine what effect the different spatial environments (NT, UCT, SCT) had on variance in male siring success.
+
+Details on the experimental protocol are found in the file "AW_Updated_TerritoryTreatmentProtocol_2020_ID.docx", from June 26th, 2020.
+
+for versions of emmeans newer than version 1.8.0 all ggplot lines calling:
+'geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=.1)'
+ must be changed to: 
+'geom_errorbar(aes(ymin=asymp.LCL, ymax=asymp.UCL), width=.1)'
+
+
+## libraries
+```{r}
+library(ggplot2)
+library(ggbeeswarm)
+library(dplyr)
+library(tidyverse)
+library(glmmTMB)
+library(emmeans)
+```
+
+## read in data
+```{r}
+dat <- read.csv("../data/Territoriality_CommonCompetitorCVL_2020.csv") %>% na.omit() 
+```
+
+## All data
+
+### Some plots
+
+Fecundity.... but set up around male factors
+```{r}
+ggplot(dat, aes(Treatment, y = (wt_female + cvl_male + cvl_female), colour = Male_type)) +
+  geom_boxplot(outliers = FALSE) + 
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+theme_bw()
+```
+
+
+ Proportion of offspring that are from the male we are testing
+```{r}
+ggplot(dat, aes(Treatment, y = (wt_female)/(wt_female + cvl_female), colour = Male_type)) + 
+  geom_boxplot(outliers = FALSE) + 
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  theme_bw()
+```
+
+
+
+## Omit cages with zero female progeny (not relevant to our analysis)
+```{r}
+dummy_var <- with(dat, 
+                  (wt_female + cvl_female) > 0, TRUE, FALSE)
+
+data_progeny <- dat[dummy_var,]
+summary(data_progeny)
+```
+
+### plot again...
+Proportion of offspring that are from the male we are testing
+```{r}
+ggplot(data_progeny, aes(Treatment, y = (wt_female)/(wt_female + cvl_female), colour = Male_type)) + 
+  geom_boxplot() + 
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  theme_bw()
+```
+
+## Fit the model
+
+```{r}
+mod1 <- glmmTMB(cbind(wt_female, cvl_female) ~ Treatment*Male_type + (1|Block) + (1|Cage_number),
+                data = data_progeny,
+                family = binomial)
+```
+
+
+```{r}
+summary(mod1)
+```
+
+### Anova table
+```{r}
+model_anova_supplement <- as.data.frame(car::Anova(mod1))
+```
+
+### Estimates, logit scale
+```{r}
+mod_est <- emmeans(mod1, ~ Treatment | Male_type)
+```
+
+### model contrasts and plot of contrasts
+```{r}
+mod_contrasts <- contrast(mod_est, method = "trt.vs.ctrl1")
+
+confint(mod_contrasts)
+
+plot(mod_contrasts) + xlab("change in fertilization success relative to NT \n (logit scale)") +
+  geom_vline(xintercept = 0, lty = 2, alpha = 0.5) +
+  theme_bw()
+```
+
+
+### Estimates, response (probability)
+
+This may be easier to interpret than examining the contrasts on the 
+```{r}
+mod_est_response <- emmeans(mod1, ~ Treatment | Male_type, type = "response")
+```
+
+### model contrasts and plot of contrasts
+
+Contrasts expressed as odds ratios
+```{r}
+mod_contrasts_OR <- contrast(mod_est_response, method = "trt.vs.ctrl1")
+
+confint(mod_contrasts_OR)
+
+plot(mod_contrasts_OR) + xlab("change in fertilization success relative to NT \n (odds ratio)") +
+  geom_vline(xintercept = 1, lty = 2, alpha = 0.5) +
+  theme_bw()
+```
+
+Plotting for publication by TA
+```{r}
+
+contrast_df <- as.data.frame(confint(mod_contrasts_OR))
+
+ggplot(contrast_df, aes(x = odds.ratio, y = contrast)) +
+  facet_grid(rows = vars(Male_type)) +
+  geom_pointrange(aes(xmin = lower.CL, xmax = upper.CL)) +
+  theme_classic() +
+  geom_vline(xintercept = 1, lty = 2, alpha = 0.5) +
+  xlab("Change in fertilization success \n relative to NT (odds ratio)") +
+  ylab("Territorial treatment contrast")
+
+
+```
+
+
+
+## interaction contrast
+How much more successful are the high quality males against the common competitors, compared to the low quality males, across the spatial treatments?
+
+
+```{r}
+estimates_set_up <- emmeans(mod1, pairwise ~ Treatment * Male_type)
+
+interaction_contrast <- contrast(estimates_set_up [[1]], 
+                                 interaction = c(Treatment = "trt.vs.ctrl1", Male_type = "pairwise"),
+                                 by = NULL)
+
+confint(interaction_contrast)
+```
+
+
+**Note from ID** While we can include this plot below, my feeling is to use the plot *above* with `mod_contrasts_OR` in the paper, and in the paper also report the interaction contrast as odds ratios, with their CIs (since it is just two numbers) in the results section as prose (or in the figure legend for the above plot).
+
+```{r}
+plot(interaction_contrast) + xlab("change in male competitive fitness of high quality vs low quality males \n in each environmental relative to NT \n (logit)") +
+  geom_vline(xintercept = 0, lty = 2, alpha = 0.5) +
+  theme_bw()
+```
+
