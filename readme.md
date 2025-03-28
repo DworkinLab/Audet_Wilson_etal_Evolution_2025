@@ -219,34 +219,34 @@ Length_px - length in pixels
 
 'Aggression_Analysis'
 
-	- This script corresponds to all aggression analyses
-	- Uses the data file 'MM_aggression_FINAL.csv'
+- This script corresponds to all aggression analyses
+- Uses the data file 'MM_aggression_FINAL.csv'
 
 'AW_ConditionDependence_siringSuccess_Experiment'
 
-	- This script corresponds to the siring success analyses
-	- Uses data from file 'Territoriality_CommonCompetitorCVL_2020.csv'
+- This script corresponds to the siring success analyses
+- Uses data from file 'Territoriality_CommonCompetitorCVL_2020.csv'
 
 'Between_generation_comparison'
 
-	- This script corresponds to analyses looking at thorax size changes between F35 and F75
-	- This script uses both data files 'F35_wideFly.csv' and 'gen75_wideFly.csv'
+- This script corresponds to analyses looking at thorax size changes between F35 and F75
+- This script uses both data files 'F35_wideFly.csv' and 'gen75_wideFly.csv'
 
 'combining_plots'
 
-	- This script is used to turn figures from F35 and F75 in to multi-panel plots
-	- This script reads in no data, but is run when both 'TA_working_F35_analysis' and 
+- This script is used to turn figures from F35 and F75 in to multi-panel plots
+- This script reads in no data, but is run when both 'TA_working_F35_analysis' and 
 'TA_working_F75_analysis' have been run and go-lot objects are in the environment
 
 'TA_working_F35_analysis'
 
-	- This script corresponds to all analyses done in the generation 35 flies
-	- This script uses the data file 'Audet_2022_terryflies.csv' and 'tarsus_ConditionData.csv' and writes out the data file 'F35_wideFly.csv'
+- This script corresponds to all analyses done in the generation 35 flies
+- This script uses the data file 'Audet_2022_terryflies.csv' and 'tarsus_ConditionData.csv' and writes out the data file 'F35_wideFly.csv'
 
 'TA_working_F75_analysis'
 
-	- This script corresponds to all analyses done in the generation 75 flies
-	- This script uses data from 'TA_Measurements_F75_working.csv' and writes out the data file 'gen75_wideFly.csv'
+- This script corresponds to all analyses done in the generation 75 flies
+- This script uses data from 'TA_Measurements_F75_working.csv' and writes out the data file 'gen75_wideFly.csv'
 
 
 FIGURES:
@@ -264,20 +264,37 @@ These were fixed in the analysis, but kept here for accurate record keeping.
 Flies sexed incorrectly:
 
 NTR1_C1_M_*_19
+
 NTR1_C2_F_*_10
+
 NTR1_C2_F_*_12
+
 NTR1_C2_F_*_7
+
 NTR2_C2_F_*_19
+
 NTR3_C0_F_*_15
+
 NTR3_C0_F_*_16
+
 NTR3_C0_F_*_3
+
 NTR4_C0_F_*_20
+
 SCTR1_C0_M_*_6
+
 SCTR2_C0_F_*_3
+
 SCTR2_C1_M_*_4
+
 SCTR2_C2_F_*_4
+
 SCTR3_C1_M_*_14
+
 UCTR1_C0_F_*_20
+
 UCTR1_C2_F_*_7
+
 UCTR2_C0_F_*_10
+
 UCTR4_C2_F_*_15
