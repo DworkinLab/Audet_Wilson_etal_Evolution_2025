@@ -7,7 +7,7 @@ This repository contains all of the data and scripts to repeat the analyses of t
 
 Audet, T. Wilson, A. Dukas, R. & Dworkin, I. 2025. The role of resource defensibility in facilitating sexually-selected weapon evolution: An experimental evolution test. Evolution. Accepted
 
-doi to manuscript at journal will be added once available. [Pre-print of previous version of manuscript is available](ttps://doi.org/10.1101/2024.12.06.627045) 
+doi to manuscript at journal will be added once available. [Pre-print of previous version of manuscript is available](https://doi.org/10.1101/2024.12.06.627045) 
 
 
 ## Basic information
